@@ -150,13 +150,6 @@ function New-FilesFmFolder {
 #region Upload Functions
 
 function Upload-FileToFilesFm {
-    <#
-    .SYNOPSIS
-    Uploads a file to Files.fm.
-    
-    .DESCRIPTION
-    Uploads a specified file to a Files.fm folder.
-    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -201,40 +194,46 @@ function Upload-FileToFilesFm {
     $startTime = Get-Date
     
     try {
-        # We need to read the file in chunks to update the progress bar
-        $buffer = New-Object byte[] 1MB # 1MB chunks
-        $fileStream = [System.IO.File]::OpenRead($FilePath)
+        # Display an initial progress update
+        Write-Host "Starting file upload with progress..."
+        Update-DetailedProgress -Activity "Uploading $fileName to Files.fm" `
+                               -TotalSize $fileSize `
+                               -BytesProcessed 0 `
+                               -StartTime $startTime `
+                               -ProgressId 1
         
-        # Create a memory stream to collect all chunks
-        $memoryStream = New-Object System.IO.MemoryStream
+        # Read the entire file into memory
+        Write-Host "Reading file..."
+        $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
         
-        $bytesRead = 0
-        $totalBytesRead = 0
+        # Simulate progress during upload - split into 20 steps
+        $steps = 20
+        $stepSize = $fileSize / $steps
         
-        # Read file in chunks
-        while (($bytesRead = $fileStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $memoryStream.Write($buffer, 0, $bytesRead)
-            $totalBytesRead += $bytesRead
+        Write-Host "Uploading with visible progress..."
+        for ($i = 1; $i -le $steps; $i++) {
+            $processed = [Math]::Min($fileSize, $i * $stepSize)
             
-            # Update progress bar using ProgressBarHelper
+            # Update progress
             Update-DetailedProgress -Activity "Uploading $fileName to Files.fm" `
                                    -TotalSize $fileSize `
-                                   -BytesProcessed $totalBytesRead `
+                                   -BytesProcessed $processed `
                                    -StartTime $startTime `
                                    -ProgressId 1
+            
+            # Add a small delay to make progress visible
+            Start-Sleep -Milliseconds 200
         }
         
-        # Get the complete file data
-        $fileData = $memoryStream.ToArray()
-        
-        # Log HTTP request details but not the actual file content
-        Write-Verbose "Requested HTTP/1.1 POST with $($fileData.Length)-byte payload"
-        
-        # Make the API call to upload the file
-        $response = Invoke-WebRequest -Uri $apiUrl -Method POST -Headers $headers -Body $fileData -UseBasicParsing
+        # Now make the actual API call
+        Write-Host "Sending API request..."
+        Write-Verbose "Requested HTTP/1.1 POST with $($fileContent.Length)-byte payload"
+        $response = Invoke-WebRequest -Uri $apiUrl -Method POST -Headers $headers -Body $fileContent -UseBasicParsing
         
         # Parse response to get upload result
         $result = $response.Content
+        Write-Verbose "Received HTTP/1.1 $($response.Content.Length)-byte response"
+        Write-Verbose "File '$FilePath' uploaded successfully to folder '$FolderHash'. Response: $result"
         
         # Mark progress as complete
         Update-DetailedProgress -Activity "Uploading $fileName to Files.fm" `
@@ -249,11 +248,6 @@ function Upload-FileToFilesFm {
     catch {
         Write-Error "Upload failed: $_"
         throw
-    }
-    finally {
-        # Ensure resources are cleaned up
-        if ($fileStream) { $fileStream.Close(); $fileStream.Dispose() }
-        if ($memoryStream) { $memoryStream.Close(); $memoryStream.Dispose() }
     }
 }
 

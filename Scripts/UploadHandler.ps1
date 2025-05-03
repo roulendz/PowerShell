@@ -11,7 +11,7 @@ to Files.fm for the selected file or folder.
 
 .PARAMETER Path
 The full path to the file or folder selected via the context menu. This is automatically
-passed as 	'%1' by the registry command.
+passed as '%1' by the registry command.
 
 .NOTES
 Requires the FileUpload and ProgressBarHelper modules to be available in the ../Modules directory.
@@ -44,9 +44,25 @@ if ($env:PSModulePath -notlike "*$modulesDir*") {
 try {
     Import-Module FileUpload -ErrorAction Stop -Verbose:$VerbosePreference
     # Import the user-provided ProgressBarHelper
-    Import-Module ProgressBarHelper -ErrorAction Stop -Verbose:$VerbosePreference 
+    Import-Module ProgressBarHelper -ErrorAction Stop -Verbose:$VerbosePreference
+    
+    # Test progress bar - add this code here
+    Write-Host "Testing basic progress bar..."
+    1..10 | ForEach-Object {
+        Write-Progress -Activity "Testing Basic Progress" -Status "$_% Complete" -PercentComplete ($_ * 10)
+        Start-Sleep -Milliseconds 300
+    }
+    
+    # Now test ProgressBarHelper
+    Write-Host "Testing ProgressBarHelper..."
+    $testStart = Get-Date
+    1..10 | ForEach-Object {
+        Update-DetailedProgress -Activity "Testing DetailedProgress" -TotalSize 10 -BytesProcessed $_ -StartTime $testStart -ProgressId 0
+        Start-Sleep -Milliseconds 300
+    }
+    Update-DetailedProgress -Activity "Testing DetailedProgress" -TotalSize 10 -BytesProcessed 10 -StartTime $testStart -ProgressId 0 -Completed
 } catch {
-    Write-Error "Failed to import required modules (FileUpload, ProgressBarHelper) from 	$modulesDir. Ensure they exist and PSModulePath is correct. Error: $_"
+    Write-Error "Failed to import required modules (FileUpload, ProgressBarHelper) from $modulesDir. Ensure they exist and PSModulePath is correct. Error: $_"
     # Optional: Show a message box
     try { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show("Error: Could not load required modules. See console.", "Module Load Error", "OK", "Error") } catch {}
     exit 1
@@ -59,7 +75,7 @@ if (Test-Path -Path $configFilePath -PathType Leaf) {
         $configJson = Get-Content -Path $configFilePath -Raw
         $config = $configJson | ConvertFrom-Json -ErrorAction Stop
     } catch {
-        Write-Error "Failed to load or parse configuration file 	${configFilePath}: $_"
+        Write-Error "Failed to load or parse configuration file ${configFilePath}: $_"
     }
 }
 
@@ -173,4 +189,3 @@ if ($uploadSuccess) {
 }
 
 #endregion
-
