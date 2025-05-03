@@ -6,7 +6,7 @@ Handles the file/folder upload process triggered by the context menu.
 
 .DESCRIPTION
 This script is called by the context menu entry. It reads the configuration,
-imports the necessary modules (FileUpload, TaskProgressBar), and initiates the upload
+imports the necessary modules (FileUpload, ProgressBarHelper), and initiates the upload
 to Files.fm for the selected file or folder.
 
 .PARAMETER Path
@@ -14,14 +14,14 @@ The full path to the file or folder selected via the context menu. This is autom
 passed as 	'%1' by the registry command.
 
 .NOTES
-Requires the FileUpload and TaskProgressBar modules to be available in the ../Modules directory.
-Requires config.json to exist in the parent directory with Files.fm credentials and base folder hash.
+Requires the FileUpload and ProgressBarHelper modules to be available in the ../Modules directory.
+Requires config.json to exist in the parent directory with Files.fm credentials and base folder hash/key.
 Parallel upload for multiple selections is NOT implemented due to complexity with context menu argument passing.
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Mandatory=$true, Position=0)]
     [string]$SelectedPath
 )
 
@@ -42,11 +42,11 @@ if ($env:PSModulePath -notlike "*$modulesDir*") {
 
 # Import required modules
 try {
-    Import-Module FileUpload -ErrorAction Stop
-    Import-Module TaskProgressBar -ErrorAction Stop
-}
-catch {
-    Write-Error "Failed to import required modules (FileUpload, TaskProgressBar) from 	${modulesDir}. Ensure they exist and PSModulePath is correct. Error: $_"
+    Import-Module FileUpload -ErrorAction Stop -Verbose:$VerbosePreference
+    # Import the user-provided ProgressBarHelper
+    Import-Module ProgressBarHelper -ErrorAction Stop -Verbose:$VerbosePreference 
+} catch {
+    Write-Error "Failed to import required modules (FileUpload, ProgressBarHelper) from 	$modulesDir. Ensure they exist and PSModulePath is correct. Error: $_"
     # Optional: Show a message box
     try { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show("Error: Could not load required modules. See console.", "Module Load Error", "OK", "Error") } catch {}
     exit 1
@@ -58,14 +58,13 @@ if (Test-Path -Path $configFilePath -PathType Leaf) {
     try {
         $configJson = Get-Content -Path $configFilePath -Raw
         $config = $configJson | ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
+    } catch {
         Write-Error "Failed to load or parse configuration file 	${configFilePath}: $_"
     }
 }
 
 if (-not $config -or -not $config.Username -or -not $config.Password -or -not $config.BaseFolderHash -or -not $config.FolderKey) {
-    Write-Error "Configuration is missing or incomplete in $configFilePath (Username, Password, BaseFolderHash, FolderKey are required). Please run the configuration GUI (Main.ps1 -Configure)."
+    Write-Error "Configuration is missing or incomplete in ${configFilePath} (Username, Password, BaseFolderHash, FolderKey are required). Please run the configuration GUI (Main.ps1 -Configure)."
     # Optional: Show a message box
     try { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show("Configuration missing or incomplete. Please run the configuration script.", "Configuration Error", "OK", "Error") } catch {}
     exit 1
@@ -75,85 +74,76 @@ if (-not $config -or -not $config.Username -or -not $config.Password -or -not $c
 
 #region Main Upload Logic
 
-Write-Host "Starting Files.fm upload for: $SelectedPath"
+Write-Host "Starting Files.fm upload for: ${SelectedPath}"
 
 $item = Get-Item -Path $SelectedPath -ErrorAction SilentlyContinue
 
 if (-not $item) {
-    Write-Error "Selected path does not exist: $SelectedPath"
+    Write-Error "Selected path does not exist: ${SelectedPath}"
     try { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show("Error: Selected path not found: $SelectedPath", "Upload Error", "OK", "Error") } catch {}
     exit 1
 }
 
 $uploadSuccess = $false
-$mainTask = $null
+# Removed progressIdToComplete as ProgressBarHelper handles its own completion
 
 try {
     if ($item.PSIsContainer) {
         # Handle Folder Upload
         $folderName = $item.Name
-        $mainTask = Initialize-TaskProgress -Activity "Uploading Folder: $folderName" -Status "Starting recursive upload..."
+        # Upload-FolderToFilesFmRecursive now uses ProgressBarHelper internally
         
-        # Use splatting for parameters to avoid line continuation issues
+        # Use splatting for parameters
         $folderUploadParams = @{
-            LocalFolderPath  = $item.FullName
+            LocalFolderPath = $item.FullName
             ParentFolderHash = $config.BaseFolderHash
-            Username         = $config.Username
-            Password         = $config.Password
-            ErrorAction      = "Stop" # Stop if critical error like folder creation fails
-            # GetFileHashes = $true # Optional: Uncomment if you want to track individual file hashes
+            Username = $config.Username
+            Password = $config.Password
+            ErrorAction = "Stop" # Stop if critical error like folder creation fails
+            Verbose = $VerbosePreference
+            # GetFileHashes = $true # Optional
         }
-        $uploadResult = Upload-FolderToFilesFmRecursive @folderUploadParams
+        $uploadResultObject = Upload-FolderToFilesFmRecursive @folderUploadParams
+        Write-Verbose "[UploadHandler] Folder upload result object: $($uploadResultObject | Out-String)"
         
-        # Upload-FolderToFilesFmRecursive returns $true/$false or hash list
-        if ($uploadResult -is [boolean] -and $uploadResult) {
+        # Check the Success property returned by the function
+        if ($uploadResultObject.Success) {
             $uploadSuccess = $true
-            Update-TaskProgress -ProgressId $mainTask -Status "Folder upload completed successfully."
-        }
-        elseif ($uploadResult -is [array]) {
-            $uploadSuccess = $true # Assume success if we got hashes back
-            Update-TaskProgress -ProgressId $mainTask -Status "Folder upload completed. $($uploadResult.Count) files processed."
-        }
-        else {
-            Update-TaskProgress -ProgressId $mainTask -Status "Folder upload failed or partially failed."
-        }
+        } 
+        # No explicit progress update needed here
         
-    }
-    else {
+    } else {
         # Handle File Upload
         $fileName = $item.Name
-        $mainTask = Initialize-TaskProgress -Activity "Uploading File: $fileName" -Status "Initiating upload..." -TotalCount 1
+        # Upload-FileToFilesFm now uses ProgressBarHelper internally
         
         # Use splatting for parameters
         $fileUploadParams = @{
-            FilePath    = $item.FullName
-            FolderHash  = $config.BaseFolderHash
-            FolderKey   = $config.FolderKey # Use the configured FolderKey
+            FilePath = $item.FullName
+            FolderHash = $config.BaseFolderHash
+            FolderKey = $config.FolderKey # Use the configured FolderKey
             ErrorAction = "Stop"
+            Verbose = $VerbosePreference
             # GetFileHash = $true # Optional
         }
-        $uploadResult = Upload-FileToFilesFm @fileUploadParams
+        # Upload-FileToFilesFm now returns only the API result ('d' or hash) on success
+        $apiResult = Upload-FileToFilesFm @fileUploadParams
+        Write-Verbose "[UploadHandler] File upload API result: $apiResult"
                             
-        # Check result (returns 'd' or hash on success)
-        if ($uploadResult -is [string] -and $uploadResult.Length -gt 0) {
+        # Check result (ApiResult contains 'd' or hash on success)
+        if ($apiResult -is [string] -and $apiResult.Length -gt 0) {
             $uploadSuccess = $true
-            Update-TaskProgress -ProgressId $mainTask -Status "File uploaded successfully. Result: $uploadResult" -PercentComplete 100
         }
-        else {
-            Update-TaskProgress -ProgressId $mainTask -Status "File upload failed. Result: $uploadResult"
-        }
+        # No explicit progress update needed here
     }
-}
-catch {
-    Write-Error "An error occurred during upload: $_"
-    if ($mainTask -ne $null) {
-        Update-TaskProgress -ProgressId $mainTask -Status "Upload failed: $($_.Exception.Message)"
-    }
-}
-finally {
-    if ($mainTask -ne $null) {
-        Complete-TaskProgress -ProgressId $mainTask
-    }
+} catch {
+    # Error is written within the Upload functions or Invoke-FilesFmApi
+    # ProgressBarHelper completion on error is handled within the Upload functions
+    Write-Error "An error occurred during the upload process: $($_.Exception.Message | Out-String)"
+    $uploadSuccess = $false # Ensure success is false if an exception occurred
+} finally {
+    # No progress completion logic needed here anymore
+    Write-Verbose "[UploadHandler] Upload process finished. Success status: $uploadSuccess"
 }
 
 #endregion
@@ -169,20 +159,16 @@ Write-Host $notifyMessage
 try {
     Add-Type -AssemblyName PresentationFramework
     $icon = if ($uploadSuccess) { [System.Windows.MessageBoxImage]::Information } else { [System.Windows.MessageBoxImage]::Error }
+    # Ensure message box appears even if run hidden (might not work perfectly)
     [System.Windows.MessageBox]::Show($notifyMessage, $notifyTitle, "OK", $icon)
-}
-catch {
+} catch {
     Write-Warning "Could not display GUI notification."
 }
-
-# Keep console open briefly if run directly (won't happen via context menu)
-# Start-Sleep -Seconds 5
 
 # Determine exit code
 if ($uploadSuccess) {
     exit 0
-}
-else {
+} else {
     exit 1
 }
 

@@ -146,16 +146,16 @@ function Update-DetailedProgress {
 
     #region Display Progress
     # Construct the status string
-    [string]$statusString = "$percentComplete% Complete - $speedString - Elapsed: $($elapsedTime.ToString(\'hh\:mm\:ss\'))"
-    
+    [string]$statusString = "$percentComplete% Complete - $speedString - Elapsed: $($elapsedTime.ToString('hh:mm:ss'))"   
     # Add remaining time if not completed and time is calculable
     if (-not $Completed.IsPresent -and $remainingTime.TotalSeconds -gt 0) {
-        $statusString += " - Remaining: $($remainingTime.ToString(\'hh\:mm\:ss\'))"
+        $statusString += " - Remaining: $($remainingTime.ToString('hh:mm:ss'))"
     }
     elseif ($Completed.IsPresent) {
-        $statusString = "100% Complete - Total Time: $($elapsedTime.ToString(\'hh\:mm\:ss\'))"
+        $statusString = "100% Complete - Total Time: $($elapsedTime.ToString('hh:mm:ss'))"
         $percentComplete = 100 # Ensure 100% on completion
     }
+    #endregion
 
     # Prepare parameters for Write-Progress splatting
     $progressParams = @{
@@ -172,7 +172,6 @@ function Update-DetailedProgress {
 
     # Call Write-Progress with calculated values
     Write-Progress @progressParams
-    #endregion
 }
 
 #endregion
@@ -181,4 +180,3 @@ function Update-DetailedProgress {
 # Export the function for use
 Export-ModuleMember -Function Update-DetailedProgress
 #endregion
-
