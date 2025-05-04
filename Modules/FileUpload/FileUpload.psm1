@@ -1,249 +1,411 @@
-# File Path: F:\Documents\PowerShell\Modules\FileUpload\FileUpload.psm1
+# FileUpload.psm1
+# Description: PowerShell module for uploading files to Files.fm service
 
-<#
-.SYNOPSIS
-FileUpload module for Files.fm service.
+#Requires -Version 7.5
 
-.DESCRIPTION
-This module provides functions for interacting with the Files.fm API,
-including uploading files and folders, creating folders, and listing folder contents.
+#region Module Configuration
+# Ensures strict mode for better error handling
+Set-StrictMode -Version Latest
+#endregion
 
-.NOTES
-Author: Manus
-Date: 2025-05-03
-#>
+#region Constants and Variables
+# Default path for configuration file
+[string]$script:ConfigPath = Join-Path $PSScriptRoot "../../config.json"
 
-#region API Functions
+# Base URI for Files.fm API
+[string]$script:BaseUri = "https://api.files.fm"
 
-function Invoke-FilesFmApi {
+# Object to store current session data
+[hashtable]$script:SessionData = @{}
+#endregion
+
+#region Private Functions
+
+function Test-SessionCookie {
     <#
     .SYNOPSIS
-    Makes API calls to Files.fm service.
-    
+        Validates if current session is still active
     .DESCRIPTION
-    Internal function used by other module functions to make HTTP requests to the Files.fm API.
+        Checks if the PHPSESSID cookie is present and valid by testing the session
+    .OUTPUTS
+        [bool] True if session is valid, False otherwise
     #>
-    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    
+    # Check if session data exists
+    if (-not $script:SessionData -or -not $script:SessionData.ContainsKey('PHPSESSID')) {
+        return $false
+    }
+    
+    try {
+        # Test the session by calling test_session.php
+        $uri = "$($script:BaseUri)/api/test_session.php"
+        $response = Invoke-WebRequest -Uri $uri -Method Get -WebSession $script:SessionData.WebSession -ErrorAction Stop
+        
+        # Check if the response is successful
+        return $response.StatusCode -eq 200
+    }
+    catch {
+        # Session is invalid or expired
+        return $false
+    }
+}
+
+function Set-SessionContext {
+    <#
+    .SYNOPSIS
+        Establishes and maintains session context for Files.fm API
+    .DESCRIPTION
+        Creates a web session and stores session ID and credentials for subsequent API calls
+    .PARAMETER Credentials
+        Credentials for Files.fm account
+    .OUTPUTS
+        [void]
+    #>
+    [OutputType([void])]
+    param(
+        [ValidateNotNull()]
+        [System.Management.Automation.PSCredential]$Credentials
+    )
+    
+    # Check if session is already valid
+    if (Test-SessionCookie) {
+        Write-Verbose "Using existing valid session"
+        return
+    }
+    
+    # Create new session
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    
+    try {
+        # Login to Files.fm API
+        $loginUri = "$($script:BaseUri)/api/login.php"
+        $loginParams = @{
+            user = $Credentials.UserName
+            pass = $Credentials.GetNetworkCredential().Password
+        }
+        
+        Write-Verbose "Logging in to Files.fm..."
+        $response = Invoke-WebRequest -Uri $loginUri -Method Post -Body $loginParams -SessionVariable session -ErrorAction Stop
+        
+        # Parse the login response (format: cookie:PHPSESSID=...; user=...; hash=...; etc.)
+        $responseContent = $response.Content
+        $sessionID = $null
+        $rootHash = $null
+        $rootKey = $null
+        
+        # Extract values from response
+        if ($responseContent -match "PHPSESSID=(.*?);") {
+            $sessionID = $matches[1]
+        }
+        if ($responseContent -match "root_upload_hash=(.*?);") {
+            $rootHash = $matches[1]
+        }
+        if ($responseContent -match "root_upload_key=(.*?)(?:;|$)") {
+            $rootKey = $matches[1]
+        }
+        
+        # Check if login was successful
+        if ($sessionID -and $rootHash) {
+            Write-Verbose "Login successful - Session ID: $sessionID"
+            
+            # Store session data
+            $script:SessionData = @{
+                WebSession     = $session
+                PHPSESSID      = $sessionID
+                RootFolderHash = $rootHash
+                DeleteKey      = $rootKey
+                AddKey         = $rootKey
+            }
+        }
+        else {
+            # Login failed
+            throw "Login failed: Invalid credentials or server error"
+        }
+    }
+    catch {
+        # Handle login errors
+        throw "Failed to login to Files.fm: $_"
+    }
+}
+
+function Get-ConfigurationData {
+    <#
+    .SYNOPSIS
+        Loads configuration data from JSON file
+    .DESCRIPTION
+        Reads and parses the configuration file containing credentials and settings
+    .PARAMETER ConfigPath
+        Path to configuration file
+    .OUTPUTS
+        [PSCustomObject] Configuration data object
+    #>
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$ConfigPath = $script:ConfigPath
+    )
+    
+    # Check if configuration file exists
+    if (-not (Test-Path $ConfigPath)) {
+        throw "Configuration file not found at: $ConfigPath"
+    }
+    
+    try {
+        # Read and parse the configuration file
+        $config = Get-Content $ConfigPath | ConvertFrom-Json -ErrorAction Stop
+        
+        # Validate required properties
+        if (-not $config.Username -or -not $config.Password) {
+            throw "Configuration file missing required properties (Username, Password)"
+        }
+        
+        return $config
+    }
+    catch {
+        throw "Failed to load configuration: $_"
+    }
+}
+
+function Initialize-Session {
+    <#
+    .SYNOPSIS
+        Initializes session using configuration data
+    .DESCRIPTION
+        Sets up connection to Files.fm API using credentials from configuration
+    .PARAMETER Config
+        Configuration object containing credentials
+    .OUTPUTS
+        [void]
+    #>
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [PSCustomObject]$Config = $null
+    )
+    
+    # Load configuration if not provided
+    if (-not $Config) {
+        $Config = Get-ConfigurationData
+    }
+    
+    # Convert to secure credentials
+    $securePassword = ConvertTo-SecureString $Config.Password -AsPlainText -Force
+    $credentials = New-Object System.Management.Automation.PSCredential($Config.Username, $securePassword)
+    
+    # Establish session
+    Set-SessionContext -Credentials $credentials
+}
+
+function Get-FolderKeys {
+    <#
+    .SYNOPSIS
+        Retrieves add and delete keys for a specified folder
+    .DESCRIPTION
+        Gets the required keys to perform operations on a folder
+    .PARAMETER FolderHash
+        Hash of the folder to get keys for
+    .OUTPUTS
+        [PSCustomObject] Object containing AddFileKey and DeleteKey
+    #>
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Uri,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$Method = "GET",
-        
-        [Parameter(Mandatory = $false)]
-        [hashtable]$Headers = @{},
-        
-        [Parameter(Mandatory = $false)]
-        [object]$Body = $null,
-        
-        [Parameter(Mandatory = $false)]
-        [switch]$ReturnRawResponse
+        [ValidateNotNullOrEmpty()]
+        [string]$FolderHash
     )
     
     try {
+        # Ensure session is valid
+        if (-not (Test-SessionCookie)) {
+            Initialize-Session
+        }
+        
+        # Get folder keys
+        $uri = "$($script:BaseUri)/api/get_upload_keys.php"
         $params = @{
-            Uri = $Uri
-            Method = $Method
-            Headers = $Headers
-            UseBasicParsing = $true
-            ErrorAction = "Stop"
+            hash = $FolderHash
+            user = (Get-ConfigurationData).Username
+            pass = (Get-ConfigurationData).Password
         }
         
-        if ($Body) {
-            $params.Body = $Body
-        }
+        Write-Verbose "Getting keys for folder: $FolderHash"
+        $response = Invoke-WebRequest -Uri $uri -Method Get -Body $params -WebSession $script:SessionData.WebSession -ErrorAction Stop
+        $keys = $response.Content | ConvertFrom-Json -ErrorAction Stop
         
-        Write-Verbose "Calling Files.fm API: $Method $Uri"
-        
-        $response = Invoke-WebRequest @params
-        
-        if ($ReturnRawResponse) {
-            return $response
-        } else {
-            if ($response.Content) {
-                try {
-                    return $response.Content | ConvertFrom-Json
-                } catch {
-                    return $response.Content
-                }
-            }
-            return $null
-        }
-    } catch {
-        Write-Error "API call failed: $_"
-        throw
+        return $keys
+    }
+    catch {
+        throw "Failed to get folder keys: $_"
     }
 }
 
 #endregion
 
-#region Helper Functions
+#region Public Functions
 
-function Get-FilesFmFolderList {
+function Send-FileToFilesFm {
     <#
     .SYNOPSIS
-    Gets the contents of a Files.fm folder.
-    
+        Uploads a single file to Files.fm
     .DESCRIPTION
-    Retrieves a list of files and folders within a specified Files.fm folder.
+        Uploads a specified file to a Files.fm folder using the API
+    .PARAMETER FilePath
+        Path to the file to upload
+    .PARAMETER FolderHash
+        Hash of the destination folder
+    .PARAMETER Config
+        Optional configuration object
+    .OUTPUTS
+        [PSCustomObject] Upload result containing FileHash and Success status
     #>
-    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$FolderHash,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$Username,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$Password
-    )
-    
-    # Implementation details
-    Write-Verbose "Getting folder listing for folder hash: $FolderHash"
-    
-    # Return a placeholder results object
-    return @{
-        Success = $true
-        Files = @()
-        Folders = @()
-    }
-}
-
-function New-FilesFmFolder {
-    <#
-    .SYNOPSIS
-    Creates a new folder in Files.fm.
-    
-    .DESCRIPTION
-    Creates a new folder within a specified parent folder in Files.fm.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FolderName,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$ParentFolderHash,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$Username,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$Password
-    )
-    
-    # Implementation details
-    Write-Verbose "Creating new folder: $FolderName in parent folder hash: $ParentFolderHash"
-    
-    # Return a placeholder result
-    return @{
-        Success = $true
-        FolderHash = "new_folder_hash"
-        FolderKey = "new_folder_key"
-    }
-}
-
-#endregion
-
-#region Upload Functions
-
-function Upload-FileToFilesFm {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [ValidateScript({ Test-Path $_ -PathType Leaf })]
         [string]$FilePath,
         
-        [Parameter(Mandatory = $true)]
-        [string]$FolderHash,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$FolderKey,
+        [Parameter(Mandatory = $false)]
+        [string]$FolderHash = "",
         
         [Parameter(Mandatory = $false)]
-        [switch]$GetFileHash
+        [PSCustomObject]$Config = $null
     )
     
-    # Check if file exists
-    if (-not (Test-Path -Path $FilePath -PathType Leaf)) {
-        Write-Error "File not found: $FilePath"
-        return $null
+    # Load config if not provided
+    if (-not $Config) {
+        $Config = Get-ConfigurationData
     }
     
-    # Get file info
-    $fileInfo = Get-Item -Path $FilePath
-    $fileName = $fileInfo.Name
-    $fileSize = $fileInfo.Length
-    
-    Write-Verbose "Preparing to upload file: $fileName ($fileSize bytes) to folder hash: $FolderHash"
-    
-    # Generate a random up_id for the upload
-    $upId = -join ((97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
-    
-    # Construct API URL
-    $apiUrl = "https://api.files.fm/save_file.php?up_id=$upId&key=227d9"
-    
-    # Prepare upload params
-    $headers = @{
-        "Content-Type" = "application/octet-stream"
-        "Content-Disposition" = "attachment; filename=$fileName"
+    # Use BaseFolderHash from config if FolderHash not provided
+    if (-not $FolderHash -and $Config.BaseFolderHash) {
+        $FolderHash = $Config.BaseFolderHash
     }
     
-    # Initialize progress tracking
-    $startTime = Get-Date
+    # Validate FolderHash
+    if (-not $FolderHash) {
+        throw "FolderHash must be provided either as parameter or in config file"
+    }
     
     try {
-        # Display an initial progress update
-        Write-Host "Starting file upload with progress..."
-        Update-DetailedProgress -Activity "Uploading $fileName to Files.fm" `
-                               -TotalSize $fileSize `
-                               -BytesProcessed 0 `
-                               -StartTime $startTime `
-                               -ProgressId 1
-        
-        # Read the entire file into memory
-        Write-Host "Reading file..."
-        $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
-        
-        # Simulate progress during upload - split into 20 steps
-        $steps = 20
-        $stepSize = $fileSize / $steps
-        
-        Write-Host "Uploading with visible progress..."
-        for ($i = 1; $i -le $steps; $i++) {
-            $processed = [Math]::Min($fileSize, $i * $stepSize)
-            
-            # Update progress
-            Update-DetailedProgress -Activity "Uploading $fileName to Files.fm" `
-                                   -TotalSize $fileSize `
-                                   -BytesProcessed $processed `
-                                   -StartTime $startTime `
-                                   -ProgressId 1
-            
-            # Add a small delay to make progress visible
-            Start-Sleep -Milliseconds 200
+        # Ensure session is valid
+        if (-not (Test-SessionCookie)) {
+            Initialize-Session -Config $Config
         }
         
-        # Now make the actual API call
-        Write-Host "Sending API request..."
-        Write-Verbose "Requested HTTP/1.1 POST with $($fileContent.Length)-byte payload"
-        $response = Invoke-WebRequest -Uri $apiUrl -Method POST -Headers $headers -Body $fileContent -UseBasicParsing
+        # Get folder keys
+        $keys = Get-FolderKeys -FolderHash $FolderHash
         
-        # Parse response to get upload result
-        $result = $response.Content
-        Write-Verbose "Received HTTP/1.1 $($response.Content.Length)-byte response"
-        Write-Verbose "File '$FilePath' uploaded successfully to folder '$FolderHash'. Response: $result"
+        # Prepare file for upload
+        $file = Get-Item $FilePath
+        $fileName = $file.Name
         
-        # Mark progress as complete
-        Update-DetailedProgress -Activity "Uploading $fileName to Files.fm" `
-                               -TotalSize $fileSize `
-                               -BytesProcessed $fileSize `
-                               -StartTime $startTime `
-                               -ProgressId 1 `
-                               -Completed
+        # Upload the file
+        $uploadUri = "$($script:BaseUri)/save_file.php?up_id=$FolderHash&key=$($keys.AddFileKey)&get_file_hash=1"
         
-        return $result # Return the upload result ('d' or hash on success)
+        Write-Verbose "Uploading file: $fileName"
+        $response = Invoke-WebRequest -Uri $uploadUri -Method Post -InFile $FilePath -ContentType "multipart/form-data" -WebSession $script:SessionData.WebSession -ErrorAction Stop
+        
+        # Parse response
+        $fileHash = $response.Content.Trim()
+        
+        # Check if upload was successful
+        if ($fileHash -ne 'd' -and $fileHash -ne '') {
+            Write-Verbose "Successfully uploaded: $fileName (Hash: $fileHash)"
+            return [PSCustomObject]@{
+                Success   = $true
+                FileHash  = $fileHash
+                FileName  = $fileName
+                FileUrl   = "https://files.fm/f/$fileHash"
+                FolderUrl = "https://files.fm/u/$FolderHash"
+            }
+        }
+        else {
+            throw "Upload failed: Invalid response from server"
+        }
+        
+    }
+    catch {
+        Write-Error "Failed to upload file: $_"
+        return [PSCustomObject]@{
+            Success  = $false
+            FileHash = $null
+            FileName = $fileName
+            Error    = $_.Exception.Message
+        }
+    }
+}
+
+# Create a simplified version of Invoke-FileUploadToFilesFm that handles the parameter set issue
+function Upload-FileToFilesFm {
+    <#
+    .SYNOPSIS
+        Uploads file(s) to Files.fm service
+    .DESCRIPTION
+        Helper function to handle file uploads without parameter set conflicts
+    .PARAMETER Path
+        Path to file to upload
+    .OUTPUTS
+        [void] Displays summary and copies to clipboard
+    #>
+    [OutputType([void])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+    
+    try {
+        # Load configuration
+        $config = Get-ConfigurationData
+        
+        Write-Host "Uploading file: $Path"
+        $result = Send-FileToFilesFm -FilePath $Path -Config $config
+        
+        # Convert single file result to summary format
+        $uploadResult = [PSCustomObject]@{
+            TotalFiles        = 1
+            SuccessfulUploads = if ($result.Success) { 1 } else { 0 }
+            FailedUploads     = if ($result.Success) { 0 } else { 1 }
+            UploadedFiles     = if ($result.Success) { @{ $result.FileName = $result.FileHash } } else { @{} }
+            FolderHash        = $config.BaseFolderHash
+            FolderUrl         = "https://files.fm/u/$($config.BaseFolderHash)"
+            DetailedResults   = @([PSCustomObject]@{
+                    FileName = $result.FileName
+                    Result   = $result
+                })
+        }
+        
+        # Display summary
+        Write-Host "`n--- Upload Summary ---"
+        Write-Host "Target Files.fm Folder: $($uploadResult.FolderUrl)"
+        Write-Host "Total files attempted: $($uploadResult.TotalFiles)"
+        Write-Host "Successfully uploaded: $($uploadResult.SuccessfulUploads)"
+        Write-Host "Upload errors: $($uploadResult.FailedUploads)"
+        
+        # Prepare clipboard content
+        $clipboardContent = @()
+        
+        if ($uploadResult.SuccessfulUploads -gt 0) {
+            Write-Host "`nSuccessfully uploaded files:"
+            $clipboardContent += "Files uploaded to Files.fm:"
+            $clipboardContent += "Folder: $($uploadResult.FolderUrl)"
+            $clipboardContent += ""
+            
+            foreach ($file in $uploadResult.UploadedFiles.GetEnumerator()) {
+                Write-Host " - $($file.Key) (Hash: $($file.Value))"
+                Write-Host "   Link: https://files.fm/f/$($file.Value)"
+                $clipboardContent += "$($file.Key): https://files.fm/f/$($file.Value)"
+            }
+            
+            # Copy to clipboard
+            $clipboardText = $clipboardContent -join "`r`n"
+            Set-Clipboard -Value $clipboardText
+            Write-Host "`nUpload links copied to clipboard!"
+        }
+        
+        Write-Host "`nUpload process finished."
+        
     }
     catch {
         Write-Error "Upload failed: $_"
@@ -251,47 +413,10 @@ function Upload-FileToFilesFm {
     }
 }
 
-function Upload-FolderToFilesFmRecursive {
-    <#
-    .SYNOPSIS
-    Recursively uploads a folder and its contents to Files.fm.
-    
-    .DESCRIPTION
-    Creates a folder in Files.fm and uploads all files and subfolders recursively.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$LocalFolderPath,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$ParentFolderHash,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$Username,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$Password,
-        
-        [Parameter(Mandatory = $false)]
-        [switch]$GetFileHashes
-    )
-    
-    # Implementation details
-    Write-Verbose "Recursively uploading folder: $LocalFolderPath to parent folder hash: $ParentFolderHash"
-    
-    # Return a placeholder result
-    return @{
-        Success = $true
-        FilesUploaded = 0
-        FoldersCreated = 0
-    }
-}
-
 #endregion
 
-# Export all functions
-Export-ModuleMember -Function Get-FilesFmFolderList
-Export-ModuleMember -Function New-FilesFmFolder
+#region Module Export
+# Export public functions
+Export-ModuleMember -Function Send-FileToFilesFm
 Export-ModuleMember -Function Upload-FileToFilesFm
-Export-ModuleMember -Function Upload-FolderToFilesFmRecursive
+#endregion
