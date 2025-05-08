@@ -4,9 +4,14 @@ param (
 
 Write-Host "➡️ Uploading from context menu: $TargetPath"
 
-# Load upload functions (adjust paths as needed)
-. "F:\Documents\PowerShell\Modules\FilesFmTools\Functions\Public\Send-FilesFmUpload.ps1"
-. "F:\Documents\PowerShell\Modules\FilesFmTools\Functions\Public\Send-FilesFmUploadFolder.ps1"
+# Get the folder where this script lives
+$thisScriptPath = $MyInvocation.MyCommand.Path
+$thisScriptDir = Split-Path -Path $thisScriptPath -Parent
+
+# Construct relative paths to function scripts
+$moduleRoot = Join-Path $thisScriptDir "..\Modules\FilesFmTools\Functions\Public" | Resolve-Path
+. (Join-Path $moduleRoot "Send-FilesFmUpload.ps1")
+. (Join-Path $moduleRoot "Send-FilesFmUploadFolder.ps1")
 
 # Decide if it's a file or folder
 if (Test-Path -Path $TargetPath -PathType Leaf) {
