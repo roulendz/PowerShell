@@ -1,43 +1,22 @@
-# Script: UploadHandler.ps1
-# Description: Handles file/folder uploads to Files.fm triggered by the context menu.
-
-#Requires -Version 7.2 # For Write-Progress features and potentially newer cmdlet behavior
-
-param(
-    [Parameter(Mandatory = $true, Position = 0)]
-    [string]$InputPath
+param (
+    [string]$TargetPath
 )
 
-# Import the FileUpload module from the standard PowerShell Modules location
-# Update the path to point to your actual module location
-$modulePath = "F:\Documents\PowerShell\Modules\FileUpload\FileUpload.psm1"
+Write-Host "➡️ Uploading from context menu: $TargetPath"
 
-# Check if the module file exists
-if (-not (Test-Path $modulePath)) {
-    Write-Error "FileUpload.psm1 module not found at: $modulePath"
-    Write-Host "`nPlease ensure FileUpload.psm1 is in the correct location."
-    Write-Host "Press Enter to close."
-    Read-Host
-    exit 1
+# Load upload functions (adjust paths as needed)
+. "F:\Documents\PowerShell\Modules\FilesFmTools\Functions\Public\Send-FilesFmUpload.ps1"
+. "F:\Documents\PowerShell\Modules\FilesFmTools\Functions\Public\Send-FilesFmUploadFolder.ps1"
+
+# Decide if it's a file or folder
+if (Test-Path -Path $TargetPath -PathType Leaf) {
+    Send-FilesFmUpload -FilePath $TargetPath
+}
+elseif (Test-Path -Path $TargetPath -PathType Container) {
+    Send-FilesFmUploadFolder -FolderPath $TargetPath
+}
+else {
+    Write-Error "❌ Invalid target path: $TargetPath"
 }
 
-# Import the module
-Write-Verbose "Loading module from: $modulePath"
-Import-Module $modulePath -Force
-
-# Use the simplified upload function
-try {
-    # Call the new Upload-FileToFilesFm function which handles everything
-    Upload-FileToFilesFm -Path $InputPath -Verbose
-    
-    Write-Host "`nPress Enter to close."
-    Read-Host
-}
-catch {
-    Write-Error "Upload failed: $_"
-    Write-Host "`nPress Enter to close."
-    Read-Host
-    exit 1
-}
-
-exit 0
+Read-Host "Press Enter to close"
